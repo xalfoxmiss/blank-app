@@ -3,84 +3,126 @@ import requests
 import base64
 import json
 
-st.set_page_config(page_title="RuedaLens - Análisis de Neumáticos", layout="centered")
+# --- Configuración ---
+API_KEY = "rdlns_sk_20c632c13c914c0a1e4d92f03d88663c112a019c3719bbc3"
+API_URL = "https://api.ruedalens.com/v1/analyze"
+BASE_SEARCH_URL = "https://pre.muchoneumatico.com/neumaticos/buscar"
 
-st.title("🔍 RuedaLens - Detección de Medida")
+# --- Función de Codificación Robusta ---
+def encode_image(image_file):
+    if image_file is not None:
+        # 1. IMPORTANTE: Reiniciar el puntero al inicio del archivo
+        # Si Streamlit usó el archivo para la preview, el puntero está al final.
+        image_file.seek(0)
+        
+        # 2. Leer bytes y codificar
+        bytes_data = image_file.getvalue()
+        b64_str = base64.b64encode(bytes_data).decode('utf-8')
+        
+        # 3. Debug: Imprimir tamaño para asegurar que no está vacío
+        # st.write(f"Debug: Imagen codificada tamaño: {len(b64_str)} caracteres")
+        return b64_str
+    return None
 
-with st.form("image_upload_form"):
-    st.subheader("Sube las imágenes")
+def extract_specs(vehicle_data):
+    # Prioridad: 1. Leído (current) -> 2. Ficha Técnica (oe_front) -> 3. Trasero (oe_rear)
+    sources = [
+        vehicle_data.get("current_tire", {}), 
+        vehicle_data.get("oe_front_tire", {}),
+        vehicle_data.get("oe_rear_tire", {})
+    ]
+    for tire in sources:
+        if tire and tire.get("width") and tire.get("aspect_ratio") and tire.get("diameter"):
+            return {
+                "w": tire.get("width"),
+                "ar": tire.get("aspect_ratio"),
+                "d": tire.get("diameter")
+            }
+    return None
+
+# --- UI ---
+st.set_page_config(page_title="Ruedalens App", page_icon="🚗")
+st.title("🚗 Escáner de Neumáticos")
+
+with st.form("main_form"):
+    c1, c2 = st.columns(2)
+    with c1:
+        tire_file = st.file_uploader("1. Foto Neumático", type=['jpg', 'jpeg', 'png'])
+        if tire_file: 
+            st.image(tire_file, caption="Neumático")
+    with c2:
+        car_file = st.file_uploader("2. Foto Vehículo", type=['jpg', 'jpeg', 'png'])
+        if car_file: 
+            st.image(car_file, caption="Vehículo")
     
-    tire_image = st.file_uploader("Foto del neumático", type=['jpg', 'jpeg', 'png'])
-    car_image = st.file_uploader("Foto del vehículo", type=['jpg', 'jpeg', 'png'])
-    
-    submit = st.form_submit_button("Analizar", type="primary", use_container_width=True)
+    submitted = st.form_submit_button("🔍 Analizar", type="primary")
 
-if submit:
-    if not tire_image or not car_image:
-        st.error("Debes subir ambas imágenes")
+if submitted:
+    if not tire_file or not car_file:
+        st.warning("⚠️ Sube ambas fotos.")
     else:
-        with st.spinner("Analizando imágenes..."):
-            # Encode images to base64
-            tire_b64 = base64.b64encode(tire_image.read()).decode()
-            car_b64 = base64.b64encode(car_image.read()).decode()
-            
-            # API call
+        with st.spinner("Procesando..."):
             try:
-                response = requests.post(
-                    'https://api.ruedalens.com/v1/analyze',
-                    headers={
-                        'Authorization': 'Bearer rdlns_sk_20c632c13c914c0a1e4d92f03d88663c112a019c3719bbc3',
-                        'Content-Type': 'application/json',
-                    },
-                    json={
-                        'tireImage': tire_b64,
-                        'carImage': car_b64
-                    },
-                    timeout=30
-                )
+                # Codificación
+                b64_tire = encode_image(tire_file)
+                b64_car = encode_image(car_file)
                 
+                # Verificación de seguridad (Debug)
+                if len(b64_tire) < 100 or len(b64_car) < 100:
+                    st.error("❌ Error: Las imágenes parecen estar vacías al procesarlas. Intenta subirlas de nuevo.")
+                    st.stop()
+
+                # Payload
+                payload = {
+                    "tireImage": b64_tire,
+                    "carImage": b64_car
+                }
+                
+                headers = {
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json"
+                }
+
+                # Llamada
+                response = requests.post(API_URL, headers=headers, json=payload)
                 result = response.json()
                 
-                if result.get('success') and result.get('data', {}).get('vehicles'):
-                    vehicle = result['data']['vehicles'][0]
+                # --- Procesamiento ---
+                vehicles = result.get("data", {}).get("vehicles", [])
+                
+                # Check si hay vehículos y no son objetos vacíos
+                valid_vehicle = False
+                if vehicles and len(vehicles) > 0:
+                    # A veces devuelve [{}], verificamos que tenga claves dentro
+                    if vehicles[0].keys():
+                        valid_vehicle = True
+
+                if result.get("success") and valid_vehicle:
+                    vehicle = vehicles[0]
+                    specs = extract_specs(vehicle)
                     
-                    # Extract tire dimensions
-                    current_tire = vehicle.get('current_tire') or vehicle.get('oe_front_tire')
-                    
-                    if current_tire:
-                        width = current_tire.get('width')
-                        aspect = current_tire.get('aspect_ratio')
-                        diameter = current_tire.get('diameter')
+                    if specs:
+                        w, ar, d = specs['w'], specs['ar'], specs['d']
+                        url = f"{BASE_SEARCH_URL}/{w}/{ar}/{d}/"
                         
-                        if width and aspect and diameter:
-                            # Build URL
-                            search_url = f"https://pre.muchoneumatico.com/neumaticos/buscar/{width}/{aspect}/{diameter}/"
-                            
-                            st.success("✅ Análisis completado")
-                            
-                            st.subheader("🔗 Resultado")
-                            st.markdown(f"### [{width}/{aspect} R{diameter}]({search_url})")
-                            st.markdown(f"**[Ver neumáticos disponibles →]({search_url})**", unsafe_allow_html=True)
-                            
-                            # Collapsible full response
-                            with st.expander("📋 Ver respuesta completa"):
-                                st.json(result)
-                        else:
-                            st.warning("No se pudo extraer la medida completa")
-                            with st.expander("Ver respuesta"):
-                                st.json(result)
+                        st.success(f"✅ Medida: {w}/{ar} R{d}")
+                        st.markdown(f"**Coche:** {vehicle.get('brand')} {vehicle.get('model')}")
+                        
+                        st.markdown(f"""
+                        <a href="{url}" target="_blank" style="text-decoration:none;">
+                            <div style="background-color:#FF5722;color:white;padding:15px;border-radius:5px;text-align:center;font-weight:bold;font-size:18px;">
+                                👉 VER PRECIOS Y COMPRAR
+                            </div>
+                        </a>
+                        """, unsafe_allow_html=True)
                     else:
-                        st.warning("No se encontró información de neumático")
-                        with st.expander("Ver respuesta"):
-                            st.json(result)
+                        st.warning("Se detectó el vehículo, pero no la medida exacta del neumático.")
                 else:
-                    st.error("No se detectó ningún vehículo válido")
-                    with st.expander("Ver respuesta"):
-                        st.json(result)
-                        
-            except requests.exceptions.Timeout:
-                st.error("⏱️ Timeout - La API tardó demasiado")
-            except requests.exceptions.RequestException as e:
-                st.error(f"Error en la petición: {str(e)}")
+                    st.error("⚠️ No se detectó ningún vehículo en las imágenes. Intenta con fotos más claras.")
+
+                st.divider()
+                with st.expander("Ver Respuesta Técnica (JSON)"):
+                    st.json(result)
+
             except Exception as e:
-                st.error(f"Error: {str(e)}")
+                st.error(f"Error técnico
