@@ -125,4 +125,4 @@ if submitted:
                     st.json(result)
 
             except Exception as e:
-                st.error(f"Error técnico
+                st.error(f"Error técnico: {e}")
