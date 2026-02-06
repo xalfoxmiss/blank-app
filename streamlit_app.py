@@ -6,124 +6,126 @@ import json
 # --- Configuración ---
 API_KEY = "rdlns_sk_20c632c13c914c0a1e4d92f03d88663c112a019c3719bbc3"
 API_URL = "https://api.ruedalens.com/v1/analyze"
-REDIRECT_BASE_URL = "https://pre.muchoneumatico.com/neumaticos/buscar"
+BASE_SEARCH_URL = "https://pre.muchoneumatico.com/neumaticos/buscar"
 
 # --- Funciones ---
 def encode_image(image_file):
-    """Codifica la imagen subida a Base64 string para la API."""
+    """Codifica la imagen a Base64 string raw (sin cabeceras data:image...)"""
     if image_file is not None:
+        # getvalue() obtiene los bytes, b64encode codifica, decode pasa a string
         return base64.b64encode(image_file.getvalue()).decode('utf-8')
     return None
 
-def analyze_images(tire_b64, car_b64):
-    """Envía las imágenes a la API de Ruedalens."""
-    headers = {
-        'Authorization': f'Bearer {API_KEY}',
-        'Content-Type': 'application/json',
-    }
-    payload = {
-        'tireImage': tire_b64,
-        'carImage': car_b64
-    }
-    try:
-        response = requests.post(API_URL, headers=headers, json=payload)
-        response.raise_for_status() # Lanza excepción para errores 4xx/5xx
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        return {"error": str(e)}
+def get_tire_info(vehicle_data):
+    """Intenta extraer ancho, perfil y diámetro de current_tire o oe_front_tire"""
+    # 1. Intentar leer neumático detectado (current_tire)
+    tire = vehicle_data.get("current_tire")
+    
+    # 2. Si es nulo o faltan datos, intentar con el original (oe_front_tire)
+    if not tire or not all([tire.get("width"), tire.get("aspect_ratio"), tire.get("diameter")]):
+        tire = vehicle_data.get("oe_front_tire")
+    
+    if tire:
+        return {
+            "w": tire.get("width"),
+            "ar": tire.get("aspect_ratio"),
+            "d": tire.get("diameter")
+        }
+    return None
 
 # --- Interfaz Streamlit ---
-st.set_page_config(page_title="Ruedalens Quick Scan", page_icon="🚗")
+st.set_page_config(page_title="Ruedalens Scanner", page_icon="🛞", layout="centered")
 
-st.title("🚗 Ruedalens Tire Scanner")
-st.markdown("Sube una foto del **neumático** (lectura de flanco) y una del **coche**.")
+st.title("🛞 Ruedalens -> MuchoNeumático")
+st.info("Sube las fotos para obtener el enlace directo de compra.")
 
-# Formulario
-with st.form("upload_form"):
-    col1, col2 = st.columns(2)
+with st.form("main_form"):
+    c1, c2 = st.columns(2)
+    with c1:
+        tire_file = st.file_uploader("1. Foto Neumático (Primer plano)", type=['jpg', 'jpeg', 'png'])
+    with c2:
+        car_file = st.file_uploader("2. Foto Vehículo (Completo)", type=['jpg', 'jpeg', 'png'])
     
-    with col1:
-        tire_file = st.file_uploader("1. Foto Neumático", type=['jpg', 'jpeg', 'png'])
-        if tire_file:
-            st.image(tire_file, caption="Preview Neumático", use_column_width=True)
+    submitted = st.form_submit_button("Analizar Imágenes", type="primary")
 
-    with col2:
-        car_file = st.file_uploader("2. Foto Vehículo", type=['jpg', 'jpeg', 'png'])
-        if car_file:
-            st.image(car_file, caption="Preview Vehículo", use_column_width=True)
-
-    submitted = st.form_submit_button("🔍 Analizar y Buscar")
-
-# Lógica principal
-if submitted:
-    if not tire_file or not car_file:
-        st.error("⚠️ Faltan datos: Por favor sube ambas imágenes.")
-    else:
-        with st.spinner("Procesando imágenes en Ruedalens API..."):
-            # 1. Preparar Payload
-            tire_b64 = encode_image(tire_file)
-            car_b64 = encode_image(car_file)
+if submitted and tire_file and car_file:
+    with st.spinner("Enviando a API Ruedalens..."):
+        try:
+            # Preparar payload
+            payload = {
+                "tireImage": encode_image(tire_file),
+                "carImage": encode_image(car_file)
+            }
             
-            # 2. Llamada API
-            result = analyze_images(tire_b64, car_b64)
+            headers = {
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json"
+            }
 
-            # 3. Procesar Respuesta
-            if "error" in result:
-                st.error(f"Error de conexión: {result['error']}")
-            elif result.get("success"):
-                st.success("✅ Vehículo identificado")
+            # Llamada
+            response = requests.post(API_URL, headers=headers, json=payload)
+            result = response.json()
+            
+            # --- Lógica de Extracción y Visualización ---
+            
+            extracted_data = None
+            search_url = None
+            
+            # Validar si hay datos en 'vehicles'
+            if result.get("success") and result.get("data", {}).get("vehicles"):
+                vehicles_list = result["data"]["vehicles"]
                 
-                try:
-                    # Extracción segura de datos
-                    # Asumimos que el primer vehículo es el correcto
-                    vehicle = result["data"]["vehicles"][0]
+                # Comprobar que la lista no esté vacía y el primer objeto no sea {}
+                if len(vehicles_list) > 0 and vehicles_list[0]:
+                    vehicle = vehicles_list[0]
+                    extracted_data = get_tire_info(vehicle)
                     
-                    # Intentamos sacar datos del neumático actual, sino del OE (Original Equipment)
-                    tire_data = vehicle.get("current_tire") or vehicle.get("oe_front_tire")
-                    
-                    if tire_data:
-                        w = tire_data.get("width")
-                        ar = tire_data.get("aspect_ratio")
-                        d = tire_data.get("diameter")
-
-                        if w and ar and d:
-                            # Construcción de URL final
-                            target_url = f"{REDIRECT_BASE_URL}/{w}/{ar}/{d}/"
-                            
-                            st.divider()
-                            st.subheader("Resultados")
-                            
-                            # Mostrar medida detectada
-                            st.info(f"Medida detectada: **{w}/{ar} R{d}** | Vehículo: {vehicle.get('brand')} {vehicle.get('model')}")
-                            
-                            # Botón/Link Principal
-                            st.markdown(f"""
-                            <a href="{target_url}" target="_blank" style="text-decoration:none;">
-                                <div style="
-                                    background-color: #FF5722; 
-                                    color: white; 
-                                    padding: 16px; 
-                                    border-radius: 8px; 
-                                    text-align: center; 
-                                    font-weight: bold; 
-                                    font-size: 20px; 
-                                    box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                                    🛒 VER PRECIOS EN MUCHONEUMATICO ({w}/{ar} R{d})
-                                </div>
-                            </a>
-                            """, unsafe_allow_html=True)
-                        else:
-                            st.warning("La API detectó el coche pero no pudo leer las dimensiones completas del neumático.")
+                    if extracted_data and all(extracted_data.values()):
+                        w = extracted_data['w']
+                        ar = extracted_data['ar']
+                        d = extracted_data['d']
+                        
+                        # Componer URL: https://.../buscar/255/45/19/
+                        search_url = f"{BASE_SEARCH_URL}/{w}/{ar}/{d}/"
+                        
+                        st.success(f"✅ Medida detectada: {w}/{ar} R{d}")
+                        
+                        # ENLACE VISIBLE (Botón HTML)
+                        st.markdown(f"""
+                        <a href="{search_url}" target="_blank" style="text-decoration:none;">
+                            <div style="
+                                background-color: #28a745;
+                                color: white;
+                                padding: 15px;
+                                margin: 10px 0;
+                                text-align: center;
+                                border-radius: 8px;
+                                font-size: 18px;
+                                font-weight: bold;
+                                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+                            ">
+                                🔗 IR A RESULTADOS ({w}/{ar} R{d})
+                            </div>
+                        </a>
+                        <div style="text-align:center; font-size:0.8em; color:gray;">
+                            {search_url}
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
                     else:
-                        st.warning("No se encontraron datos de neumáticos en la respuesta.")
-
-                except Exception as e:
-                    st.error(f"Error parseando la respuesta: {e}")
-
-                # 4. Debug Data (Colapsable)
-                st.divider()
-                with st.expander("🛠️ Ver JSON de respuesta completo (Copiar)"):
-                    st.code(json.dumps(result, indent=2), language="json")
+                        st.warning("⚠️ Se detectó el coche, pero no la medida completa de los neumáticos.")
+                else:
+                    st.error("⚠️ La API respondió success:true, pero no encontró vehículos (objeto vacío).")
             else:
-                st.error("La API devolvió success: false")
+                st.error(f"❌ Error en la API o no se detectó nada.")
+
+            # --- Caja Colapsable con Output Completo (Requisito) ---
+            st.divider()
+            with st.expander("📦 Ver Output JSON Completo (Debug)", expanded=False):
                 st.json(result)
+
+        except Exception as e:
+            st.error(f"Error de ejecución: {str(e)}")
+
+elif submitted:
+    st.warning("Por favor sube ambas fotos.")
